@@ -316,6 +316,17 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
             os.utime(heartbeat, (old_time, old_time))
             self.assertFalse(healthcheck(current))
 
+    def test_docker_deployment_is_isolated_and_polling_disables_webhook(self):
+        project = Path(__file__).resolve().parents[1]
+        source = (project / "bot.py").read_text(encoding="utf-8")
+        compose = (project / "docker-compose.yml").read_text(encoding="utf-8")
+        production_env = (project / ".env.production.example").read_text(encoding="utf-8")
+        self.assertIn('telegram.call("deleteWebhook", {"drop_pending_updates": False})', source)
+        self.assertIn("container_name: consilium-telegram-bot", compose)
+        self.assertIn("external: true", compose)
+        self.assertNotIn("ports:", compose)
+        self.assertIn("CONSILIUM_API_URL=http://consilium:8000", production_env)
+
 
 if __name__ == "__main__":
     unittest.main()

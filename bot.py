@@ -416,6 +416,8 @@ async def run() -> None:
     async with aiohttp.ClientSession() as session:
         telegram = TelegramClient(settings, session)
         consilium = ConsiliumClient(settings, session)
+        await telegram.call("deleteWebhook", {"drop_pending_updates": False})
+        LOG.info("Webhook Telegram отключён; long polling готов к приёму событий")
         offset: int | None = None
         LOG.info("Бот запущен в асинхронном режиме long polling")
         while not stop_event.is_set():
