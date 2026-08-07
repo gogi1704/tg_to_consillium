@@ -34,6 +34,7 @@ class FakeTelegram:
         self.callback_answers = []
         self.refresh_progress = []
         self.refresh_errors = []
+        self.manager_bindings = []
 
     async def send_auth_link(self, chat_id, auth_url):
         self.links.append((chat_id, auth_url))
@@ -53,6 +54,9 @@ class FakeTelegram:
     async def show_refresh_error(self, chat_id, message_id):
         self.refresh_errors.append((chat_id, message_id))
 
+    async def send_manager_bound(self, chat_id, name, manager_url):
+        self.manager_bindings.append((chat_id, name, manager_url))
+
 
 class FakeConsilium:
     def __init__(self, error=None):
@@ -64,6 +68,10 @@ class FakeConsilium:
         if self.error:
             raise self.error
         return "https://consilium.test/auth/messenger?t=one-time"
+
+    async def bind_manager(self, telegram_user_id, chat_id, token):
+        self.calls.append(("manager", telegram_user_id, chat_id, token))
+        return {"display_name": "Ольга", "manager_url": "https://consilium.test/manager"}
 
 
 class BotTests(unittest.IsolatedAsyncioTestCase):
@@ -100,6 +108,19 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         await handle_update(update, telegram, consilium)
 
         self.assertEqual(consilium.calls, [(20, "AbC_123-xYz")])
+
+    async def test_manager_deep_link_uses_separate_binding_scenario(self):
+        telegram = FakeTelegram()
+        consilium = FakeConsilium()
+        await handle_update({"message": {
+            "text": "/start mgr_secret", "chat": {"id": 10}, "from": {"id": 20},
+        }}, telegram, consilium)
+        self.assertEqual(consilium.calls, [("manager", 20, 10, "mgr_secret")])
+        self.assertEqual(telegram.links, [])
+        self.assertEqual(
+            telegram.manager_bindings,
+            [(10, "Ольга", "https://consilium.test/manager")],
+        )
 
     async def test_non_start_message_is_ignored(self):
         telegram = FakeTelegram()

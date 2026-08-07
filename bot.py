@@ -181,6 +181,43 @@ class ConsiliumClient:
             raise RemoteAPIError("сервис не вернул ссылку для входа")
         return auth_url
 
+    async def bind_manager(self, telegram_user_id: int, chat_id: int, token: str) -> dict[str, Any]:
+        return await post_json(
+            self.session,
+            f"{self.settings.consilium_api_url}/api/bot/manager-bind",
+            {
+                "provider": "telegram", "provider_user_id": str(telegram_user_id),
+                "chat_id": str(chat_id), "token": token,
+            },
+            headers={"Authorization": f"Bearer {self.settings.bot_integration_secret}"},
+            timeout=self.settings.request_timeout,
+        )
+
+    async def pull_manager_notifications(self) -> list[dict[str, Any]]:
+        try:
+            async with self.session.get(
+                f"{self.settings.consilium_api_url}/api/bot/manager-notifications?provider=telegram&limit=20",
+                headers={"Authorization": f"Bearer {self.settings.bot_integration_secret}"},
+                timeout=aiohttp.ClientTimeout(total=self.settings.request_timeout),
+            ) as response:
+                result = json.loads(await response.text())
+                if response.status >= 400:
+                    raise RemoteAPIError(str(result.get("detail") or f"HTTP {response.status}"))
+        except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as exc:
+            raise RemoteAPIError("сервис уведомлений временно недоступен") from exc
+        return result.get("notifications", []) if isinstance(result, dict) else []
+
+    async def acknowledge_notification(
+        self, notification_id: int, lease_token: str, success: bool, error: str = "",
+    ) -> None:
+        await post_json(
+            self.session,
+            f"{self.settings.consilium_api_url}/api/bot/manager-notifications/{notification_id}/ack",
+            {"lease_token": lease_token, "success": success, "error": error},
+            headers={"Authorization": f"Bearer {self.settings.bot_integration_secret}"},
+            timeout=self.settings.request_timeout,
+        )
+
 
 class TelegramClient:
     def __init__(self, settings: Settings, session: aiohttp.ClientSession):
@@ -292,6 +329,22 @@ class TelegramClient:
     async def send_error(self, chat_id: int, text: str) -> None:
         await self.call("sendMessage", {"chat_id": chat_id, "text": text})
 
+    async def send_manager_bound(self, chat_id: int, name: str, manager_url: str) -> None:
+        await self.call("sendMessage", {
+            "chat_id": chat_id,
+            "text": f"Готово! Telegram привязан к учётной записи менеджера «{name}». Теперь сюда будут приходить рабочие уведомления.",
+            "reply_markup": {"inline_keyboard": [[{"text": "Открыть панель менеджера", "url": manager_url}]]},
+        })
+
+    async def send_manager_notification(self, chat_id: int, payload: dict[str, Any]) -> None:
+        title = str(payload.get("title") or "Уведомление Консилиума")
+        body = str(payload.get("body") or "Откройте панель менеджера.")
+        manager_url = str(payload.get("manager_url") or "")
+        message: dict[str, Any] = {"chat_id": chat_id, "text": f"{title}\n\n{body}"}
+        if manager_url.startswith(("http://", "https://")):
+            message["reply_markup"] = {"inline_keyboard": [[{"text": "Открыть диалог", "url": manager_url}]]}
+        await self.call("sendMessage", message)
+
 
 async def handle_update(
     update: dict[str, Any],
@@ -323,10 +376,18 @@ async def handle_update(
         )
         return
 
+    token = match.group(1) or ""
     try:
+        if token.startswith("mgr_"):
+            binding = await consilium.bind_manager(telegram_user_id, chat_id, token)
+            await telegram.send_manager_bound(
+                chat_id, str(binding.get("display_name") or "Менеджер"),
+                str(binding.get("manager_url") or ""),
+            )
+            return
         auth_url = await consilium.create_auth_link(
             telegram_user_id=telegram_user_id,
-            intent_token=match.group(1) or "",
+            intent_token=token,
         )
         await telegram.send_auth_link(chat_id, auth_url)
     except RemoteAPIError as exc:
@@ -419,6 +480,31 @@ async def run() -> None:
         await telegram.call("deleteWebhook", {"drop_pending_updates": False})
         LOG.info("Webhook Telegram отключён; long polling готов к приёму событий")
         offset: int | None = None
+        async def notification_loop() -> None:
+            while not stop_event.is_set():
+                try:
+                    for notification in await consilium.pull_manager_notifications():
+                        success = False
+                        error = ""
+                        try:
+                            await telegram.send_manager_notification(
+                                int(notification["recipient_id"]), notification.get("payload") or {},
+                            )
+                            success = True
+                        except Exception as exc:
+                            error = str(exc)
+                            LOG.warning("Не удалось отправить уведомление менеджеру: %s", exc)
+                        await consilium.acknowledge_notification(
+                            int(notification["id"]), str(notification["lease_token"]), success, error,
+                        )
+                except RemoteAPIError as exc:
+                    LOG.warning("Ошибка получения уведомлений менеджеров: %s", exc)
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    pass
+
+        notification_task = asyncio.create_task(notification_loop())
         LOG.info("Бот запущен в асинхронном режиме long polling")
         while not stop_event.is_set():
             try:
@@ -444,6 +530,8 @@ async def run() -> None:
                     pass
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        notification_task.cancel()
+        await asyncio.gather(notification_task, return_exceptions=True)
     LOG.info("Бот остановлен")
 
 
