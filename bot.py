@@ -340,9 +340,16 @@ class TelegramClient:
         title = str(payload.get("title") or "Уведомление Консилиума")
         body = str(payload.get("body") or "Откройте панель менеджера.")
         manager_url = str(payload.get("manager_url") or "")
+        action_url = str(payload.get("action_url") or manager_url)
+        action_label = str(
+            payload.get("action_label")
+            or ("Открыть диалог" if manager_url else "Открыть")
+        )
         message: dict[str, Any] = {"chat_id": chat_id, "text": f"{title}\n\n{body}"}
-        if manager_url.startswith(("http://", "https://")):
-            message["reply_markup"] = {"inline_keyboard": [[{"text": "Открыть диалог", "url": manager_url}]]}
+        if action_url.startswith(("http://", "https://")):
+            message["reply_markup"] = {
+                "inline_keyboard": [[{"text": action_label[:64], "url": action_url}]],
+            }
         await self.call("sendMessage", message)
 
 

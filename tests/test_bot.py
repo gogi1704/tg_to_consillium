@@ -4,7 +4,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from bot import (
     ConfigurationError,
@@ -75,6 +75,24 @@ class FakeConsilium:
 
 
 class BotTests(unittest.IsolatedAsyncioTestCase):
+    async def test_result_notification_has_open_results_button(self):
+        telegram = TelegramClient(settings(), object())
+        telegram.call = AsyncMock()
+
+        await telegram.send_manager_notification(42, {
+            "title": "Результаты анализов готовы",
+            "body": "Документы появились.",
+            "action_url": "https://consilium.test/result",
+            "action_label": "Открыть результаты",
+        })
+
+        telegram.call.assert_awaited_once()
+        method, message = telegram.call.await_args.args
+        self.assertEqual(method, "sendMessage")
+        button = message["reply_markup"]["inline_keyboard"][0][0]
+        self.assertEqual(button["text"], "Открыть результаты")
+        self.assertEqual(button["url"], "https://consilium.test/result")
+
     async def test_start_creates_link_for_verified_telegram_sender(self):
         telegram = FakeTelegram()
         consilium = FakeConsilium()
