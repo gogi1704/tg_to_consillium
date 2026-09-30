@@ -12,6 +12,7 @@ from bot import (
     RemoteAPIError,
     Settings,
     TelegramClient,
+    deliver_notifications_once,
     healthcheck,
     handle_update,
     mark_healthy,
@@ -75,6 +76,48 @@ class FakeConsilium:
 
 
 class BotTests(unittest.IsolatedAsyncioTestCase):
+    async def test_weight_reminder_is_delivered_and_acknowledged(self):
+        telegram = AsyncMock()
+        consilium = AsyncMock()
+        consilium.pull_manager_notifications.return_value = [{
+            "id": -1000001,
+            "lease_token": "lease-one",
+            "recipient_id": "42",
+            "event_type": "weight_control_reminder",
+            "payload": {
+                "title": "Напоминание: Обед",
+                "body": "Время отметить обед.",
+                "action_url": "https://consilium.test/?conversation=11111111-1111-1111-1111-111111111111",
+                "action_label": "Открыть чат",
+            },
+        }]
+
+        delivered = await deliver_notifications_once(consilium, telegram)
+
+        self.assertEqual(delivered, 1)
+        telegram.send_manager_notification.assert_awaited_once_with(
+            42, consilium.pull_manager_notifications.return_value[0]["payload"],
+        )
+        consilium.acknowledge_notification.assert_awaited_once_with(
+            -1000001, "lease-one", True, "",
+        )
+
+    async def test_failed_weight_reminder_is_returned_for_retry(self):
+        telegram = AsyncMock()
+        telegram.send_manager_notification.side_effect = RemoteAPIError("chat not found")
+        consilium = AsyncMock()
+        consilium.pull_manager_notifications.return_value = [{
+            "id": -1000002, "lease_token": "lease-two", "recipient_id": "43",
+            "payload": {"title": "Напоминание: Обед", "body": "Пора поесть."},
+        }]
+
+        delivered = await deliver_notifications_once(consilium, telegram)
+
+        self.assertEqual(delivered, 0)
+        consilium.acknowledge_notification.assert_awaited_once_with(
+            -1000002, "lease-two", False, "chat not found",
+        )
+
     async def test_result_notification_has_open_results_button(self):
         telegram = TelegramClient(settings(), object())
         telegram.call = AsyncMock()
@@ -92,6 +135,25 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         button = message["reply_markup"]["inline_keyboard"][0][0]
         self.assertEqual(button["text"], "Открыть результаты")
         self.assertEqual(button["url"], "https://consilium.test/result")
+
+    async def test_weight_reminder_button_keeps_exact_conversation_link(self):
+        telegram = TelegramClient(settings(), object())
+        telegram.call = AsyncMock()
+        conversation_url = (
+            "https://consilium.test/"
+            "?conversation=11111111-1111-1111-1111-111111111111"
+        )
+
+        await telegram.send_manager_notification(42, {
+            "title": "Напоминание: Обед",
+            "body": "Время отметить обед.",
+            "action_url": conversation_url,
+            "action_label": "Открыть чат",
+        })
+
+        _, message = telegram.call.await_args.args
+        button = message["reply_markup"]["inline_keyboard"][0][0]
+        self.assertEqual(button, {"text": "Открыть чат", "url": conversation_url})
 
     async def test_start_creates_link_for_verified_telegram_sender(self):
         telegram = FakeTelegram()

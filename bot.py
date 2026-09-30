@@ -457,6 +457,37 @@ async def handle_refresh_callback(
             pass
 
 
+async def deliver_notifications_once(
+    consilium: ConsiliumClient,
+    telegram: TelegramClient,
+) -> int:
+    """Deliver one claimed batch and always return its outcome to Consilium."""
+    delivered = 0
+    for notification in await consilium.pull_manager_notifications():
+        success = False
+        error = ""
+        try:
+            await telegram.send_manager_notification(
+                int(notification["recipient_id"]),
+                notification.get("payload") or {},
+            )
+            success = True
+            delivered += 1
+        except Exception as exc:
+            error = str(exc)
+            LOG.warning(
+                "Не удалось отправить уведомление Telegram получателю %s: %s",
+                notification.get("recipient_id"), exc,
+            )
+        await consilium.acknowledge_notification(
+            int(notification["id"]),
+            str(notification["lease_token"]),
+            success,
+            error,
+        )
+    return delivered
+
+
 async def run() -> None:
     load_dotenv()
     settings = Settings.from_env()
@@ -490,22 +521,9 @@ async def run() -> None:
         async def notification_loop() -> None:
             while not stop_event.is_set():
                 try:
-                    for notification in await consilium.pull_manager_notifications():
-                        success = False
-                        error = ""
-                        try:
-                            await telegram.send_manager_notification(
-                                int(notification["recipient_id"]), notification.get("payload") or {},
-                            )
-                            success = True
-                        except Exception as exc:
-                            error = str(exc)
-                            LOG.warning("Не удалось отправить уведомление менеджеру: %s", exc)
-                        await consilium.acknowledge_notification(
-                            int(notification["id"]), str(notification["lease_token"]), success, error,
-                        )
+                    await deliver_notifications_once(consilium, telegram)
                 except RemoteAPIError as exc:
-                    LOG.warning("Ошибка получения уведомлений менеджеров: %s", exc)
+                    LOG.warning("Ошибка получения уведомлений Consilium: %s", exc)
                 try:
                     await asyncio.wait_for(stop_event.wait(), timeout=5)
                 except asyncio.TimeoutError:
