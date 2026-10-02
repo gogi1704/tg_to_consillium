@@ -268,6 +268,9 @@ class TelegramClient:
             {
                 "chat_id": chat_id,
                 "text": AUTH_LINK_TEXT,
+                # The authorization URL must stay in the private bot chat.
+                # Telegram hides forwarding and saving for protected messages.
+                "protect_content": True,
                 "reply_markup": self.auth_keyboard(auth_url),
             },
         )

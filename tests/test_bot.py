@@ -282,6 +282,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
             await telegram.send_auth_link(10, "https://consilium.test/auth?t=new")
 
         payload = call.await_args.args[1]
+        self.assertIs(payload["protect_content"], True)
         buttons = payload["reply_markup"]["inline_keyboard"]
         self.assertEqual(buttons[0][0]["url"], "https://consilium.test/auth?t=new")
         self.assertEqual(buttons[1][0]["text"], "Не работает ссылка")
