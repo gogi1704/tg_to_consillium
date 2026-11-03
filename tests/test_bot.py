@@ -16,6 +16,7 @@ from bot import (
     healthcheck,
     handle_update,
     mark_healthy,
+    normalize_channel_post,
 )
 
 
@@ -76,6 +77,52 @@ class FakeConsilium:
 
 
 class BotTests(unittest.IsolatedAsyncioTestCase):
+    async def test_channel_post_is_forwarded_as_metadata_and_file_id(self):
+        telegram = AsyncMock()
+        consilium = AsyncMock()
+        consilium.settings = Settings(
+            telegram_bot_token="123:test",
+            consilium_api_url="http://consilium.test",
+            bot_integration_secret="shared-secret",
+            telegram_feed_enabled=True,
+            telegram_feed_channel_id="-100777",
+        )
+        update = {"channel_post": {
+            "message_id": 19, "date": 1793692800,
+            "chat": {"id": -100777, "title": "Канал", "username": "public_health"},
+            "caption": "Полезный пост",
+            "photo": [
+                {"file_id": "small", "file_unique_id": "one", "file_size": 10, "width": 90, "height": 90},
+                {"file_id": "large", "file_unique_id": "two", "file_size": 100, "width": 1200, "height": 800},
+            ],
+        }}
+
+        await handle_update(update, telegram, consilium)
+
+        payload = consilium.publish_feed_post.await_args.args[0]
+        self.assertEqual(payload["channel"]["id"], "-100777")
+        self.assertEqual(payload["text"], "Полезный пост")
+        self.assertEqual(payload["media"][0]["file_id"], "large")
+        self.assertEqual(payload["post_url"], "https://t.me/public_health/19")
+
+    async def test_get_updates_requests_channel_events(self):
+        telegram = TelegramClient(settings(), AsyncMock())
+        telegram.call = AsyncMock(return_value=[])
+        await telegram.get_updates(12)
+        allowed = telegram.call.await_args.args[1]["allowed_updates"]
+        self.assertIn("channel_post", allowed)
+        self.assertIn("edited_channel_post", allowed)
+
+    def test_video_post_normalization_does_not_contain_binary_data(self):
+        payload = normalize_channel_post({
+            "message_id": 20, "date": 1793692800,
+            "chat": {"id": -100777, "username": "public_health"},
+            "caption": "Видео",
+            "video": {"file_id": "video-id", "file_unique_id": "video-unique", "file_size": 999, "mime_type": "video/mp4"},
+        })
+        self.assertEqual(payload["media"][0]["file_id"], "video-id")
+        self.assertNotIn("data", payload["media"][0])
+
     async def test_weight_reminder_is_delivered_and_acknowledged(self):
         telegram = AsyncMock()
         consilium = AsyncMock()

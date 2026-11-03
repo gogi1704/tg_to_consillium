@@ -9,6 +9,7 @@ import signal
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 import aiohttp
@@ -58,6 +59,8 @@ class Settings:
     request_timeout: int = 15
     healthcheck_file: Path = Path("/tmp/consilium-tg-bot.heartbeat")
     healthcheck_max_age: int = 120
+    telegram_feed_enabled: bool = False
+    telegram_feed_channel_id: str = ""
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -84,6 +87,10 @@ class Settings:
         polling_timeout = int(os.getenv("POLLING_TIMEOUT", "30"))
         request_timeout = int(os.getenv("REQUEST_TIMEOUT", "15"))
         healthcheck_max_age = int(os.getenv("HEALTHCHECK_MAX_AGE", "120"))
+        telegram_feed_enabled = os.getenv(
+            "TELEGRAM_FEED_ENABLED", "false",
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        telegram_feed_channel_id = os.getenv("TELEGRAM_FEED_CHANNEL_ID", "").strip()
         if not 1 <= polling_timeout <= 50:
             raise ConfigurationError("POLLING_TIMEOUT должен быть от 1 до 50 секунд")
         if not 1 <= request_timeout <= 60:
@@ -91,6 +98,10 @@ class Settings:
         if healthcheck_max_age < polling_timeout + 30:
             raise ConfigurationError(
                 "HEALTHCHECK_MAX_AGE должен быть минимум на 30 секунд больше POLLING_TIMEOUT"
+            )
+        if telegram_feed_enabled and not telegram_feed_channel_id:
+            raise ConfigurationError(
+                "Для включённой ленты заполните TELEGRAM_FEED_CHANNEL_ID"
             )
         return cls(
             telegram_bot_token=telegram_bot_token,
@@ -102,6 +113,8 @@ class Settings:
                 os.getenv("HEALTHCHECK_FILE", "/tmp/consilium-tg-bot.heartbeat")
             ),
             healthcheck_max_age=healthcheck_max_age,
+            telegram_feed_enabled=telegram_feed_enabled,
+            telegram_feed_channel_id=telegram_feed_channel_id,
         )
 
 
@@ -218,6 +231,15 @@ class ConsiliumClient:
             timeout=self.settings.request_timeout,
         )
 
+    async def publish_feed_post(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return await post_json(
+            self.session,
+            f"{self.settings.consilium_api_url}/api/bot/feed-posts",
+            payload,
+            headers={"Authorization": f"Bearer {self.settings.bot_integration_secret}"},
+            timeout=self.settings.request_timeout,
+        )
+
 
 class TelegramClient:
     def __init__(self, settings: Settings, session: aiohttp.ClientSession):
@@ -241,7 +263,9 @@ class TelegramClient:
     async def get_updates(self, offset: int | None) -> list[dict[str, Any]]:
         payload: dict[str, Any] = {
             "timeout": self.settings.polling_timeout,
-            "allowed_updates": ["message", "callback_query"],
+            "allowed_updates": [
+                "message", "callback_query", "channel_post", "edited_channel_post",
+            ],
         }
         if offset is not None:
             payload["offset"] = offset
@@ -356,11 +380,83 @@ class TelegramClient:
         await self.call("sendMessage", message)
 
 
+def _telegram_timestamp(value: Any) -> str:
+    try:
+        return datetime.fromtimestamp(int(value), tz=timezone.utc).isoformat()
+    except (TypeError, ValueError, OSError):
+        return ""
+
+
+def normalize_channel_post(message: dict[str, Any]) -> dict[str, Any]:
+    """Keep text and Telegram file identifiers only; never download channel media."""
+    chat = message.get("chat") if isinstance(message.get("chat"), dict) else {}
+    media: list[dict[str, Any]] = []
+    photos = message.get("photo") if isinstance(message.get("photo"), list) else []
+    if photos:
+        photo = max(
+            (item for item in photos if isinstance(item, dict)),
+            key=lambda item: int(item.get("file_size") or 0), default=None,
+        )
+        if photo:
+            media.append({
+                "kind": "photo", "file_id": photo.get("file_id", ""),
+                "file_unique_id": photo.get("file_unique_id", ""),
+                "file_size": photo.get("file_size", 0), "width": photo.get("width", 0),
+                "height": photo.get("height", 0), "mime_type": "image/jpeg",
+            })
+    for key, kind in (("video", "video"), ("animation", "animation"), ("document", "document")):
+        item = message.get(key)
+        if not isinstance(item, dict):
+            continue
+        media.append({
+            "kind": kind, "file_id": item.get("file_id", ""),
+            "file_unique_id": item.get("file_unique_id", ""),
+            "file_size": item.get("file_size", 0), "width": item.get("width", 0),
+            "height": item.get("height", 0), "duration": item.get("duration", 0),
+            "mime_type": item.get("mime_type", ""), "file_name": item.get("file_name", ""),
+        })
+    message_id = int(message.get("message_id") or 0)
+    username = str(chat.get("username") or "").lstrip("@")
+    entities_key = "caption_entities" if "caption" in message else "entities"
+    return {
+        "channel": {
+            "id": str(chat.get("id") or ""), "title": str(chat.get("title") or ""),
+            "username": username,
+        },
+        "message_id": message_id,
+        "media_group_id": str(message.get("media_group_id") or ""),
+        "published_at": _telegram_timestamp(message.get("date")),
+        "edited_at": _telegram_timestamp(message.get("edit_date")),
+        "text": str(message.get("text") or message.get("caption") or ""),
+        "entities": message.get(entities_key) if isinstance(message.get(entities_key), list) else [],
+        "author_signature": str(message.get("author_signature") or ""),
+        "post_url": f"https://t.me/{username}/{message_id}" if username and message_id else "",
+        "media": media,
+    }
+
+
 async def handle_update(
     update: dict[str, Any],
     telegram: TelegramClient,
     consilium: ConsiliumClient,
 ) -> None:
+    channel_post = update.get("channel_post") or update.get("edited_channel_post")
+    if isinstance(channel_post, dict):
+        if not consilium.settings.telegram_feed_enabled:
+            return
+        chat_id = str((channel_post.get("chat") or {}).get("id") or "")
+        expected = consilium.settings.telegram_feed_channel_id
+        if expected and chat_id != expected:
+            return
+        try:
+            await consilium.publish_feed_post(normalize_channel_post(channel_post))
+        except RemoteAPIError as exc:
+            LOG.warning(
+                "Не удалось передать публикацию Telegram message_id=%s: %s",
+                channel_post.get("message_id"), exc,
+            )
+        return
+
     callback = update.get("callback_query")
     if isinstance(callback, dict):
         return await handle_refresh_callback(callback, telegram, consilium)

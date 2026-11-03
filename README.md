@@ -107,6 +107,8 @@ nano .env
 TELEGRAM_BOT_TOKEN=ТОКЕН_ОТ_BOTFATHER
 CONSILIUM_API_URL=http://consilium:8000
 BOT_INTEGRATION_SECRET=ТОТ_ЖЕ_СЕКРЕТ_ЧТО_У_КОНСИЛИУМА
+TELEGRAM_FEED_ENABLED=true
+TELEGRAM_FEED_CHANNEL_ID=-1001234567890
 
 POLLING_TIMEOUT=30
 REQUEST_TIMEOUT=15
@@ -117,6 +119,10 @@ HEALTHCHECK_MAX_AGE=120
 
 Значение `BOT_INTEGRATION_SECRET` должно посимвольно совпадать в обоих
 проектах. Ограничьте доступ к файлу:
+
+Для ленты добавьте этого бота администратором публичного канала и укажите его
+числовой ID в `TELEGRAM_FEED_CHANNEL_ID`. Бот передаёт только текст, метаданные
+и Telegram `file_id`: фото и видео не скачиваются и не сохраняются ботом.
 
 ```bash
 chmod 600 .env
