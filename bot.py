@@ -231,6 +231,21 @@ class ConsiliumClient:
             timeout=self.settings.request_timeout,
         )
 
+    async def submit_broadcast_vote(
+        self, telegram_user_id: int, callback_data: str,
+    ) -> dict[str, Any]:
+        return await post_json(
+            self.session,
+            f"{self.settings.consilium_api_url}/api/bot/broadcast-vote",
+            {
+                "provider": "telegram",
+                "provider_user_id": str(telegram_user_id),
+                "callback_data": callback_data,
+            },
+            headers={"Authorization": f"Bearer {self.settings.bot_integration_secret}"},
+            timeout=self.settings.request_timeout,
+        )
+
     async def publish_feed_post(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await post_json(
             self.session,
@@ -373,7 +388,19 @@ class TelegramClient:
             or ("Открыть диалог" if manager_url else "Открыть")
         )
         message: dict[str, Any] = {"chat_id": chat_id, "text": f"{title}\n\n{body}"}
-        if action_url.startswith(("http://", "https://")):
+        poll_options = payload.get("poll_options")
+        if payload.get("kind") == "broadcast_poll" and isinstance(poll_options, list):
+            buttons = []
+            for option in poll_options[:10]:
+                if not isinstance(option, dict):
+                    continue
+                label = str(option.get("label") or "").strip()[:64]
+                callback_data = str(option.get("callback_data") or "").strip()[:64]
+                if label and callback_data:
+                    buttons.append([{"text": label, "callback_data": callback_data}])
+            if buttons:
+                message["reply_markup"] = {"inline_keyboard": buttons}
+        elif action_url.startswith(("http://", "https://")):
             message["reply_markup"] = {
                 "inline_keyboard": [[{"text": action_label[:64], "url": action_url}]],
             }
@@ -459,6 +486,9 @@ async def handle_update(
 
     callback = update.get("callback_query")
     if isinstance(callback, dict):
+        data = str(callback.get("data") or "")
+        if data.startswith("broadcast_vote:"):
+            return await handle_broadcast_vote_callback(callback, telegram, consilium)
         return await handle_refresh_callback(callback, telegram, consilium)
 
     message = update.get("message")
@@ -554,6 +584,30 @@ async def handle_refresh_callback(
             await telegram.show_refresh_error(chat_id, message_id)
         except RemoteAPIError:
             pass
+
+
+async def handle_broadcast_vote_callback(
+    callback: dict[str, Any],
+    telegram: TelegramClient,
+    consilium: ConsiliumClient,
+) -> None:
+    callback_id = callback.get("id")
+    sender = callback.get("from") or {}
+    telegram_user_id = sender.get("id")
+    callback_data = str(callback.get("data") or "")
+    if not isinstance(callback_id, str) or not isinstance(telegram_user_id, int):
+        return
+    try:
+        result = await consilium.submit_broadcast_vote(
+            telegram_user_id, callback_data,
+        )
+        prefix = "Ответ изменён" if result.get("changed") else "Ответ принят"
+        await telegram.answer_callback(
+            callback_id, f"{prefix}: {result.get('label') or 'готово'}",
+        )
+    except RemoteAPIError as exc:
+        LOG.warning("Не удалось сохранить голос Telegram: %s", exc)
+        await telegram.answer_callback(callback_id, "Не удалось сохранить ответ. Попробуйте ещё раз.")
 
 
 async def deliver_notifications_once(

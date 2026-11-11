@@ -75,6 +75,12 @@ class FakeConsilium:
         self.calls.append(("manager", telegram_user_id, chat_id, token))
         return {"display_name": "Ольга", "manager_url": "https://consilium.test/manager"}
 
+    async def submit_broadcast_vote(self, telegram_user_id, callback_data):
+        self.calls.append(("vote", telegram_user_id, callback_data))
+        if self.error:
+            raise self.error
+        return {"status": "recorded", "label": "Хорошо", "changed": False}
+
 
 class BotTests(unittest.IsolatedAsyncioTestCase):
     async def test_channel_post_is_forwarded_as_metadata_and_file_id(self):
@@ -201,6 +207,36 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         _, message = telegram.call.await_args.args
         button = message["reply_markup"]["inline_keyboard"][0][0]
         self.assertEqual(button, {"text": "Открыть чат", "url": conversation_url})
+
+    async def test_broadcast_poll_is_sent_as_callback_buttons(self):
+        telegram = TelegramClient(settings(), object())
+        telegram.call = AsyncMock()
+        await telegram.send_manager_notification(42, {
+            "title": "Опрос", "body": "Как вы себя чувствуете?",
+            "kind": "broadcast_poll",
+            "poll_options": [
+                {"label": "Хорошо", "callback_data": "broadcast_vote:one:o1"},
+                {"label": "Плохо", "callback_data": "broadcast_vote:one:o2"},
+            ],
+        })
+        _, message = telegram.call.await_args.args
+        buttons = message["reply_markup"]["inline_keyboard"]
+        self.assertEqual(buttons[0][0], {
+            "text": "Хорошо", "callback_data": "broadcast_vote:one:o1",
+        })
+        self.assertEqual(buttons[1][0]["text"], "Плохо")
+
+    async def test_broadcast_vote_is_forwarded_and_acknowledged(self):
+        telegram = FakeTelegram()
+        consilium = FakeConsilium()
+        callback_data = "broadcast_vote:11111111-1111-4111-8111-111111111111:o1"
+        await handle_update({"callback_query": {
+            "id": "vote-callback", "data": callback_data, "from": {"id": 20},
+        }}, telegram, consilium)
+        self.assertIn(("vote", 20, callback_data), consilium.calls)
+        self.assertEqual(telegram.callback_answers, [
+            ("vote-callback", "Ответ принят: Хорошо"),
+        ])
 
     async def test_start_creates_link_for_verified_telegram_sender(self):
         telegram = FakeTelegram()
