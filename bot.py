@@ -368,6 +368,13 @@ class TelegramClient:
             payload["text"] = text
         await self.call("answerCallbackQuery", payload)
 
+    async def remove_inline_keyboard(self, chat_id: int, message_id: int) -> None:
+        await self.call("editMessageReplyMarkup", {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "reply_markup": {"inline_keyboard": []},
+        })
+
     async def send_error(self, chat_id: int, text: str) -> None:
         await self.call("sendMessage", {"chat_id": chat_id, "text": text})
 
@@ -601,7 +608,18 @@ async def handle_broadcast_vote_callback(
         result = await consilium.submit_broadcast_vote(
             telegram_user_id, callback_data,
         )
-        prefix = "Ответ изменён" if result.get("changed") else "Ответ принят"
+        message = callback.get("message") or {}
+        chat = message.get("chat") or {}
+        chat_id = chat.get("id")
+        message_id = message.get("message_id")
+        if isinstance(chat_id, int) and isinstance(message_id, int):
+            try:
+                await telegram.remove_inline_keyboard(chat_id, message_id)
+            except RemoteAPIError as exc:
+                LOG.warning("Голос сохранён, но кнопки Telegram не удалены: %s", exc)
+        prefix = (
+            "Ответ уже принят" if result.get("already_recorded") else "Ответ принят"
+        )
         await telegram.answer_callback(
             callback_id, f"{prefix}: {result.get('label') or 'готово'}",
         )

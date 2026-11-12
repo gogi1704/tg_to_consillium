@@ -34,6 +34,7 @@ class FakeTelegram:
         self.errors = []
         self.replaced_links = []
         self.callback_answers = []
+        self.removed_keyboards = []
         self.refresh_progress = []
         self.refresh_errors = []
         self.manager_bindings = []
@@ -49,6 +50,9 @@ class FakeTelegram:
 
     async def answer_callback(self, callback_query_id, text=""):
         self.callback_answers.append((callback_query_id, text))
+
+    async def remove_inline_keyboard(self, chat_id, message_id):
+        self.removed_keyboards.append((chat_id, message_id))
 
     async def show_refresh_progress(self, chat_id, message_id):
         self.refresh_progress.append((chat_id, message_id))
@@ -232,8 +236,10 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         callback_data = "broadcast_vote:11111111-1111-4111-8111-111111111111:o1"
         await handle_update({"callback_query": {
             "id": "vote-callback", "data": callback_data, "from": {"id": 20},
+            "message": {"message_id": 31, "chat": {"id": 10}},
         }}, telegram, consilium)
         self.assertIn(("vote", 20, callback_data), consilium.calls)
+        self.assertEqual(telegram.removed_keyboards, [(10, 31)])
         self.assertEqual(telegram.callback_answers, [
             ("vote-callback", "Ответ принят: Хорошо"),
         ])
